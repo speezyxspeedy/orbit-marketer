@@ -1,0 +1,80 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions for authentication and enterprise RBAC
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOrgMember() {
+      return isAuthenticated() && request.auth.token.email.matches('.*@(orbitapp\\.io|aisaas\\.co)');
+    }
+
+    function isMarketingOrAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.role == 'admin' ||
+        request.auth.token.role == 'marketer' ||
+        isOrgMember()
+      );
+    }
+
+    function isValidTimestamp(val) {
+      return val is timestamp || val is string;
+    }
+
+    // 1. Brand Guidelines & Vector Chunks: brand_docs/{id}
+    match /brand_docs/{docId} {
+      allow read: if isAuthenticated() || isOrgMember();
+      allow write: if isMarketingOrAdmin() &&
+        request.resource.data.keys().hasAll(['id', 'fileName', 'chunks']) &&
+        request.resource.data.fileName is string &&
+        request.resource.data.chunks is list;
+    }
+
+    // 2. Campaigns: campaigns/{id}
+    match /campaigns/{campaignId} {
+      allow read: if isAuthenticated() || isOrgMember();
+      allow create, update: if isMarketingOrAdmin() &&
+        request.resource.data.keys().hasAll(['id', 'brief', 'status']) &&
+        request.resource.data.brief is string &&
+        request.resource.data.status in ['draft', 'generated', 'active'];
+      allow delete: if request.auth.token.role == 'admin';
+    }
+
+    // 3. Multi-Channel Assets: assets/{id}
+    match /assets/{assetId} {
+      allow read: if isAuthenticated() || isOrgMember();
+      allow create, update: if isMarketingOrAdmin() &&
+        request.resource.data.keys().hasAll(['id', 'campaignId', 'channel', 'angle', 'content', 'brand_rule_cited']) &&
+        request.resource.data.channel in ['hook', 'reel_script', 'ad_copy', 'email', 'landing_page'] &&
+        request.resource.data.angle in ['authority', 'urgency', 'curiosity', 'proof', 'fear-to-relief'] &&
+        request.resource.data.content is string &&
+        request.resource.data.brand_rule_cited is string;
+      allow delete: if request.auth.token.role == 'admin';
+    }
+
+    // 4. Experiments & Bandit Metrics: experiments/{id}
+    match /experiments/{experimentId} {
+      allow read: if isAuthenticated() || isOrgMember();
+      allow create, update: if isMarketingOrAdmin() &&
+        request.resource.data.keys().hasAll(['id', 'campaignId', 'variants', 'weights', 'status']) &&
+        request.resource.data.variants is list &&
+        request.resource.data.weights is list &&
+        request.resource.data.status in ['COLLECTING_DATA', 'OPTIMIZED'];
+      allow delete: if request.auth.token.role == 'admin';
+    }
+
+    // 5. Compliance Policy Audit Logs: policy_flags/{id} (Strict Append-Only Immutable Trail)
+    match /policy_flags/{flagId} {
+      allow read: if isAuthenticated() || isOrgMember();
+      allow create: if isMarketingOrAdmin() &&
+        request.resource.data.keys().hasAll(['id', 'assetId', 'riskType', 'originalLine', 'fixApplied', 'timestamp']) &&
+        request.resource.data.riskType in ['guaranteed_results', 'medical_claim', 'prohibited_phrase'] &&
+        request.resource.data.originalLine is string &&
+        request.resource.data.fixApplied is string;
+      // Compliance logs are immutable: modifications and deletions are forbidden
+      allow update, delete: if false;
+    }
+  }
+}
